@@ -166,7 +166,7 @@
     <div id="loginMsg" class="hint" style="margin-top:8px"></div>
   </div>
 
-  <div class="card">
+  <div id="feeCard" class="card">
     <h2><span class="num">1</span>本週費用</h2>
     <label class="field">
       <span>週次 / 日期</span>
@@ -190,7 +190,7 @@
   </div>
 
   <!-- 2. 人數 -->
-  <div class="card">
+  <div id="peopleCard" class="card">
     <h2><span class="num">2</span>本週人數</h2>
     <div class="row">
       <label class="field">
@@ -212,7 +212,7 @@
   </div>
 
   <!-- 4. 歷史紀錄 -->
-  <div class="card">
+  <div id="histCard" class="card">
     <h2><span class="num">4</span>歷史紀錄</h2>
     <div id="histBody"></div>
     <div id="histClearWrap" style="margin-top:8px"></div>
@@ -419,6 +419,12 @@
   function renderAuth() {
     var card = $("authCard");
     var btn = $("loginBtn");
+    // 未登入時隱藏所有資料區塊
+    var edit = canEdit();
+    $("feeCard").style.display = edit ? "" : "none";
+    $("peopleCard").style.display = edit ? "" : "none";
+    $("resultCard").style.display = edit ? "" : "none";
+    $("histCard").style.display = edit ? "" : "none";
     if (!CLOUD) { card.style.display = "none"; return; }
     card.style.display = "";
     if (server.session) {
@@ -433,7 +439,7 @@
     } else {
       card.querySelector("h2").innerHTML = '<span class="num">🔑</span>社員登入';
       card.querySelector(".row").style.display = "";
-      btn.textContent = "登入（才能儲存或刪除紀錄）";
+      btn.textContent = "登入（才能查看與修改資料）";
       btn.onclick = function () {
         var email = $("loginEmail").value.trim();
         var pw = $("loginPassword").value;
