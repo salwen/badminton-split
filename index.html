@@ -29,9 +29,24 @@
     line-height: 1.5;
   }
   .wrap { max-width: 680px; margin: 0 auto; padding: 24px 16px 80px; }
-  header { text-align: center; margin-bottom: 24px; }
+  header { text-align: center; margin-bottom: 14px; }
   header h1 { font-size: 1.7rem; margin: 0 0 4px; }
   header p { margin: 0; color: var(--muted); font-size: .95rem; }
+
+  /* 同步狀態列 */
+  #syncBar {
+    display: flex; justify-content: center; align-items: center; gap: 8px; flex-wrap: wrap;
+    font-size: .82rem; color: var(--muted);
+    background: #fff; border: 1px solid var(--border); border-radius: 99px;
+    padding: 6px 16px; margin: 0 auto 20px; max-width: 560px;
+  }
+  #syncBar.warn { color: var(--amber); background: var(--amber-light); border-color: transparent; }
+  #syncBar.err { color: var(--danger); background: #fee2e2; border-color: transparent; }
+  #syncBar button {
+    font-family: inherit; font-size: .78rem; cursor: pointer; border: none;
+    border-radius: 99px; padding: 3px 12px; background: var(--green); color: #fff;
+  }
+  #syncBar button:hover { background: var(--green-dark); }
 
   .card {
     background: var(--card);
@@ -95,6 +110,7 @@
     cursor: pointer; border: none; border-radius: 9px; background: var(--green); color: #fff;
   }
   .save-row button:hover { background: var(--green-dark); }
+  .save-row button:disabled { opacity: .6; cursor: wait; }
 
   /* 歷史 */
   .hist-item { border: 1px solid var(--border); border-radius: 10px; margin-bottom: 10px; overflow: hidden; }
@@ -103,7 +119,7 @@
     cursor: pointer; background: #fafafa;
   }
   .hist-head:hover { background: #f3f4f6; }
-  .hist-head .wk { font-weight: 700; flex: 1; }
+  .hist-head .wk { font-weight: 700; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .hist-head .sum { color: var(--green-dark); font-weight: 700; font-size: .9rem; white-space: nowrap; }
   .hist-body { padding: 4px 14px 12px; border-top: 1px solid var(--border); display: none; }
   .hist-item.open .hist-body { display: block; }
@@ -137,7 +153,19 @@
     <p>填這週的場地費、人數和用球數，自動算出老社員和新人的金額</p>
   </header>
 
-  <!-- 1. 本週費用 -->
+  <div id="syncBar">檢查連線中…</div>
+
+  <div id="authCard" class="card" style="display:none">
+    <h2><span class="num">🔑</span>社員登入</h2>
+    <div class="row">
+      <label class="field"><span>電子郵件</span><input type="text" id="loginEmail" placeholder="you@example.com" autocomplete="username"></label>
+      <label class="field"><span>密碼</span><input type="password" id="loginPassword" placeholder="你的密碼" autocomplete="current-password"></label>
+    </div>
+    <div class="save-row"><button id="loginBtn">登入（才能儲存或刪除紀錄）</button></div>
+    <div class="save-row"><button id="signupBtn" class="ghost" style="background:#fff;color:var(--green-dark);border:1.5px solid var(--green)">註冊新帳號（第一次使用）</button></div>
+    <div id="loginMsg" class="hint" style="margin-top:8px"></div>
+  </div>
+
   <div class="card">
     <h2><span class="num">1</span>本週費用</h2>
     <label class="field">
@@ -157,7 +185,7 @@
     <label class="field">
       <span>每顆球價格（元）</span>
       <input type="number" id="ballPrice" min="0" step="1" placeholder="預設 50">
-      <div class="hint">預設一顆 50 元，蛋價變了可以直接改，這裡會記住</div>
+      <div class="hint">預設一顆 50 元，改了會同步給所有人</div>
     </label>
   </div>
 
@@ -190,19 +218,61 @@
     <div id="histClearWrap" style="margin-top:8px"></div>
   </div>
 
-  <footer>資料只存在你自己的瀏覽器裡，換電腦或清除瀏覽器資料會不見喔。</footer>
+  <footer id="footNote"></footer>
 </div>
 
 <script>
 (function () {
   "use strict";
 
-  var KEY = "badminton-split-v2"; // v2：改成用人數計算的新格式
+  /* ═══════════════════════════════════════════════
+     ☁️ 雲端設定：填 Supabase 專案的網址和公開 key
+     （資料表 club_ledger_state / club_ledger_records）
+     訪客可以查看紀錄；登入的社員才能儲存、修改、刪除。
+     ═══════════════════════════════════════════════ */
+  var SUPABASE_URL = "https://syyqisrhkejzfxrqxfxt.supabase.co";
+  var SUPABASE_PUBLISHABLE_KEY = "sb_publishable_9FJrh5VR0zJXpgbgXLLVDw_Xkezf-HP";
+  var API_URL = (window.BADMINTON_API_URL || "").trim(); // 相容舊的 Apps Script 模式（一般不用填）
 
-  /* ---------- 資料 ---------- */
-  function load() {
+  var POLL_MS = 10000;        // 每 10 秒自動同步
+  var LOCAL_KEY = "badminton-split-local-v4";
+  var CACHE_KEY = "badminton-split-cache-v4"; // 雲端模式的離線快取
+  var SESSION_KEY = "badminton-split-session-v4";
+
+  var CLOUD = !!SUPABASE_URL; // 新的 Supabase 雲端模式
+
+  /* ---------- 小工具 ---------- */
+  function $(id) { return document.getElementById(id); }
+  function num(v, fallback) {
+    var n = parseFloat(v);
+    return isFinite(n) && n >= 0 ? n : (fallback || 0);
+  }
+  function money(cents) {
+    return "$" + Math.round(cents / 100).toLocaleString("zh-TW");
+  }
+  function fieldNum(id) {
+    var v = parseFloat($(id).value);
+    return isFinite(v) && v > 0 ? v : 0;
+  }
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+  function uid() {
+    return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  }
+  function todayLabel() {
+    var d = new Date();
+    return ("0" + (d.getMonth() + 1)).slice(-2) + "/" + ("0" + d.getDate()).slice(-2) + " ";
+  }
+
+  /* ---------- 資料來源 ---------- */
+  // 本機模式用的儲存
+  var local = loadLocal();
+  function loadLocal() {
     try {
-      var raw = localStorage.getItem(KEY);
+      var raw = localStorage.getItem(LOCAL_KEY);
       if (raw) {
         var s = JSON.parse(raw);
         if (s && typeof s === "object") {
@@ -211,83 +281,394 @@
           return s;
         }
       }
-    } catch (e) { /* 資料壞掉就重來 */ }
+    } catch (e) {}
     return { ballPrice: 50, history: [] };
   }
-
-  function num(v, fallback) {
-    var n = parseFloat(v);
-    return isFinite(n) && n >= 0 ? n : fallback;
+  function saveLocal() {
+    try { localStorage.setItem(LOCAL_KEY, JSON.stringify(local)); } catch (e) {}
   }
 
-  function save() {
-    try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {}
+  // 雲端模式的狀態（含離線快取）
+  var server = { records: [], ballPrice: 50, lastSync: 0, status: "none", error: "", session: null };
+  (function loadCache() {
+    if (!API_URL) return;
+    try {
+      var raw = localStorage.getItem(CACHE_KEY);
+      if (raw) {
+        var c = JSON.parse(raw);
+        if (c && Array.isArray(c.records)) {
+          server.records = c.records;
+          server.ballPrice = num(c.ballPrice, 50);
+          server.lastSync = Number(c.lastSync) || 0;
+        }
+      }
+    } catch (e) {}
+  })();
+  function saveCache() {
+    try {
+      localStorage.setItem(CACHE_KEY, JSON.stringify({
+        records: server.records, ballPrice: server.ballPrice, lastSync: server.lastSync
+      }));
+    } catch (e) {}
   }
 
-  var state = load();
-
-  /* ---------- 小工具 ---------- */
-  function $(id) { return document.getElementById(id); }
-
-  function money(cents) {
-    // 內部以「分」計算避免小數誤差，顯示時轉回元
-    return "$" + Math.round(cents / 100).toLocaleString("zh-TW");
+  function currentRecords() {
+    if (CLOUD) return server.records;
+    return API_URL ? server.records : local.history;
+  }
+  function currentBallPrice() {
+    if (CLOUD) return server.ballPrice;
+    return API_URL ? server.ballPrice : local.ballPrice;
+  }
+  function canEdit() {
+    return CLOUD ? !!server.session : true;
   }
 
-  function fieldNum(id) {
-    var v = parseFloat($(id).value);
-    return isFinite(v) && v > 0 ? v : 0;
+  /* ---------- Supabase 登入 ---------- */
+  var authHeaders = function () {
+    var h = { apikey: SUPABASE_PUBLISHABLE_KEY, Authorization: "Bearer " + SUPABASE_PUBLISHABLE_KEY };
+    if (server.session && server.session.access_token) {
+      h.apikey = SUPABASE_PUBLISHABLE_KEY;
+      h.Authorization = "Bearer " + server.session.access_token;
+    }
+    return h;
+  };
+
+  function loadSession() {
+    try {
+      var raw = localStorage.getItem(SESSION_KEY);
+      if (raw) {
+        var s = JSON.parse(raw);
+        if (s && s.access_token && s.expires_at && s.expires_at > Date.now() / 1000) {
+          server.session = s;
+        }
+      }
+    } catch (e) {}
   }
 
-  function todayLabel() {
-    var d = new Date();
-    var mm = ("0" + (d.getMonth() + 1)).slice(-2);
-    var dd = ("0" + d.getDate()).slice(-2);
-    return mm + "/" + dd + " ";
+  function sbFetch(path, options) {
+    options = options || {};
+    options.headers = Object.assign({}, authHeaders(), options.headers || {});
+    return fetch(SUPABASE_URL + path, options).then(function (r) {
+      return r.text().then(function (t) {
+        var d = null;
+        try { d = t ? JSON.parse(t) : null; } catch (e) {}
+        return { ok: r.ok, status: r.status, data: d, text: t };
+      });
+    });
   }
 
-  /* ---------- 核心：分帳計算（金額單位：分） ---------- */
-  /*
-    規則：
-    - 球費 = 用球數 × 球單價，由「全部出席的人」一起平分
-    - 場地費只由「老社員」平分，新人不用付場地費
-    - 老社員每人 = 場地費/老社員人數 + 球費/出席人數
-    - 新人每人   = 球費/出席人數
-    - 除不盡時四捨五入，尾數由老社員找齊，加總剛好等於總費用
-    - 全是新人（沒有老社員）時，退回全員平均分，並提示
-  */
+  function signIn(email, password) {
+    return sbFetch("/auth/v1/token?grant_type=password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: email, password: password })
+    }).then(function (r) {
+      if (r.ok && r.data && r.data.access_token) {
+        server.session = r.data;
+        try { localStorage.setItem(SESSION_KEY, JSON.stringify(r.data)); } catch (e) {}
+        return { ok: true };
+      }
+      var msg = (r.data && (r.data.error_description || r.data.msg || r.data.error)) || "登入失敗（" + r.status + "）";
+      if (String(msg).indexOf("Invalid login") >= 0 || String(msg).indexOf("invalid") >= 0) {
+        msg = "電子郵件或密碼不正確";
+      }
+      return { ok: false, error: msg };
+    }).catch(function (e) {
+      return { ok: false, error: "連不上 Supabase：" + e };
+    });
+  }
+
+  function signUp(email, password) {
+    return sbFetch("/auth/v1/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: email, password: password })
+    }).then(function (r) {
+      if (r.ok && r.data) {
+        if (r.data.access_token) {
+          server.session = r.data;
+          try { localStorage.setItem(SESSION_KEY, JSON.stringify(r.data)); } catch (e) {}
+          return { ok: true };
+        }
+        if (r.data.identities && r.data.identities.length === 0) {
+          return { ok: false, error: "這個電子郵件已經註冊過了，請直接登入" };
+        }
+        return { ok: "confirm", msg: "註冊成功！請到信箱收確認信，點連結後再用密碼登入" };
+      }
+      var msg = (r.data && (r.data.error_description || r.data.msg || r.data.error)) || "註冊失敗（" + r.status + "）";
+      if (String(msg).indexOf("already registered") >= 0 || String(msg).indexOf("already been") >= 0) {
+        msg = "這個電子郵件已經註冊過了，請直接登入";
+      }
+      if (String(msg).indexOf("Password") >= 0 && String(msg).indexOf("characters") >= 0) {
+        msg = "密碼至少要 6 位數";
+      }
+      return { ok: false, error: msg };
+    }).catch(function (e) {
+      return { ok: false, error: "連不上 Supabase：" + e };
+    });
+  }
+
+  function signOut() {
+    server.session = null;
+    try { localStorage.removeItem(SESSION_KEY); } catch (e) {}
+    renderAuth();
+    renderSyncBar();
+  }
+
+  function renderAuth() {
+    var card = $("authCard");
+    var btn = $("loginBtn");
+    if (!CLOUD) { card.style.display = "none"; return; }
+    card.style.display = "";
+    if (server.session) {
+      var email = (server.session.user && server.session.user.email) || "";
+      card.querySelector("h2").innerHTML = '<span class="num">🔑</span>已登入：' + esc(email);
+      card.querySelector(".row").style.display = "none";
+      btn.textContent = "登出";
+      btn.onclick = function () { signOut(); };
+      var signup2 = $("signupBtn");
+      if (signup2) signup2.style.display = "none";
+      $("loginMsg").textContent = "可以儲存、修改、刪除紀錄了";
+    } else {
+      card.querySelector("h2").innerHTML = '<span class="num">🔑</span>社員登入';
+      card.querySelector(".row").style.display = "";
+      btn.textContent = "登入（才能儲存或刪除紀錄）";
+      btn.onclick = function () {
+        var email = $("loginEmail").value.trim();
+        var pw = $("loginPassword").value;
+        if (!email || !pw) { $("loginMsg").textContent = "請輸入電子郵件和密碼"; return; }
+        btn.disabled = true;
+        $("loginMsg").textContent = "登入中…";
+        signIn(email, pw).then(function (res) {
+          btn.disabled = false;
+          $("loginPassword").value = "";
+          $("loginMsg").textContent = res.ok ? "" : res.error;
+          if (res.ok) { renderAuth(); renderSyncBar(); render(); }
+        });
+      };
+      var signup = $("signupBtn");
+      if (signup) {
+        signup.style.display = "";
+        signup.onclick = function () {
+          var email = $("loginEmail").value.trim();
+          var pw = $("loginPassword").value;
+          if (!email || !pw) { $("loginMsg").textContent = "請先填好電子郵件和密碼再註冊"; return; }
+          if (pw.length < 6) { $("loginMsg").textContent = "密碼至少要 6 位數"; return; }
+          signup.disabled = true;
+          $("loginMsg").textContent = "註冊中…";
+          signUp(email, pw).then(function (res) {
+            signup.disabled = false;
+            $("loginPassword").value = "";
+            if (res.ok) { $("loginMsg").textContent = "註冊成功，已自動登入"; renderAuth(); renderSyncBar(); render(); }
+            else if (res.ok === "confirm") { $("loginMsg").textContent = res.msg; }
+            else { $("loginMsg").textContent = res.error; }
+          });
+        };
+      }
+    }
+  }
+
+  /* ---------- 雲端同步 ---------- */
+  function apiGet() {
+    return fetch(API_URL, { method: "GET" }).then(function (r) { return r.json(); });
+  }
+  function apiPost(payload) {
+    // 用預設 text/plain，避免 CORS 預檢請求
+    return fetch(API_URL, { method: "POST", body: JSON.stringify(payload) })
+      .then(function (r) { return r.json(); });
+  }
+
+  function applyServer(d) {
+    if (!d || d.ok === false) {
+      server.error = (d && d.error) || "伺服器回應異常";
+      server.status = "err";
+      renderSyncBar();
+      return;
+    }
+    server.records = Array.isArray(d.records) ? d.records : [];
+    server.ballPrice = num(d.ballPrice, 50);
+    server.lastSync = Date.now();
+    server.error = "";
+    server.status = "ok";
+    saveCache();
+    renderSyncBar();
+    render();
+  }
+
+  /* ---------- Supabase 雲端同步 ---------- */
+  function sbApply(stateRow, recordsRows) {
+    var stateData = (stateRow && stateRow[0] && stateRow[0].data) || {};
+    server.ballPrice = num(stateData.ballPrice, 50);
+    server.records = (recordsRows || []).map(function (row) {
+      return Object.assign({}, row.data, { id: row.id });
+    });
+    server.lastSync = Date.now();
+    server.error = "";
+    server.status = "ok";
+    saveCache();
+    renderSyncBar();
+    render();
+  }
+
+  function refresh() {
+    if (CLOUD) {
+      server.status = "busy";
+      renderSyncBar();
+      return sbFetch("/rest/v1/club_ledger_state?select=*")
+        .then(function (s) {
+          if (!s.ok) throw new Error("HTTP " + s.status);
+          return sbFetch("/rest/v1/club_ledger_records?select=*&order=created_at.desc").then(function (r) {
+            if (!r.ok) throw new Error("HTTP " + r.status);
+            sbApply(s.data, r.data || []);
+          });
+        })
+        .catch(function (e) {
+          server.error = String(e);
+          server.status = "err";
+          renderSyncBar();
+        });
+    }
+    if (!API_URL) return;
+    server.status = "busy";
+    renderSyncBar();
+    apiGet().then(applyServer).catch(function (e) {
+      server.error = String(e);
+      server.status = "err";
+      renderSyncBar();
+    });
+  }
+
+  function mutate(payload, busyEl) {
+    if (busyEl) busyEl.disabled = true;
+    server.status = "busy";
+    renderSyncBar();
+    var work;
+    if (CLOUD) {
+      if (!canEdit()) {
+        server.status = "ok";
+        renderSyncBar();
+        if (busyEl) busyEl.disabled = false;
+        alert("要儲存或刪除紀錄，請先在上方登入社員帳號");
+        return Promise.resolve(null);
+      }
+      if (payload.action === "add") {
+        work = sbFetch("/rest/v1/club_ledger_records", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Prefer: "return=minimal" },
+          body: JSON.stringify({ data: payload.record })
+        }).then(function (r) {
+          if (!r.ok) throw new Error("新增失敗（HTTP " + r.status + "）" + (r.text || ""));
+          return r;
+        });
+      } else if (payload.action === "delete") {
+        work = sbFetch("/rest/v1/club_ledger_records?id=eq." + encodeURIComponent(payload.id), {
+          method: "DELETE"
+        }).then(function (r) {
+          if (!r.ok) throw new Error("刪除失敗（HTTP " + r.status + "）");
+          return r;
+        });
+      } else if (payload.action === "clearAll") {
+        work = sbFetch("/rest/v1/club_ledger_records?id=neq.00000000-0000-0000-0000-000000000000", {
+          method: "DELETE"
+        }).then(function (r) {
+          if (!r.ok) throw new Error("清除失敗（HTTP " + r.status + "）");
+          return r;
+        });
+      } else if (payload.action === "setBallPrice") {
+        work = sbFetch("/rest/v1/club_ledger_state?id=eq.true", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ data: { ballPrice: payload.ballPrice }, updated_at: new Date().toISOString() })
+        }).then(function (r) {
+          if (!r.ok) throw new Error("更新失敗（HTTP " + r.status + "）");
+          server.ballPrice = payload.ballPrice;
+          saveCache();
+          return r;
+        });
+      } else {
+        work = Promise.resolve(null);
+      }
+    } else {
+      work = apiPost(payload);
+    }
+    var apply = CLOUD ? function () { return refresh(); } : applyServer;
+    return work.then(apply).catch(function (e) {
+      server.error = String(e);
+      server.status = "err";
+      renderSyncBar();
+      alert("連不上雲端，資料沒有存成功，請稍後再試一次。\n" + e);
+    }).then(function (d) {
+      if (busyEl) busyEl.disabled = false;
+      return d;
+    });
+  }
+
+  function renderSyncBar() {
+    var bar = $("syncBar");
+    var t = server.lastSync ? new Date(server.lastSync).toLocaleTimeString("zh-TW") : "";
+    if (CLOUD) {
+      if (server.status === "busy") {
+        bar.className = "";
+        bar.innerHTML = '🔄 同步中…';
+      } else if (server.status === "err") {
+        bar.className = "err";
+        bar.innerHTML = '⚠️ 雲端連不上，現在顯示的是上次的資料 ' +
+          '<button id="syncNowBtn">重試</button>';
+      } else {
+        bar.className = "";
+        bar.innerHTML = (canEdit() ? '☁️ 已連線，資料 10 秒自動同步' : '👁️ 訪客模式：只能查看；登入後才能修改') +
+          (t ? '｜最後同步 ' + t : '') +
+          ' <button id="syncNowBtn">立即同步</button>';
+      }
+      var btn = $("syncNowBtn");
+      if (btn) btn.addEventListener("click", refresh);
+      return;
+    }
+    if (!API_URL) {
+      bar.className = "";
+      bar.innerHTML = '📴 本機模式：資料只存在這台裝置的瀏覽器裡。';
+    } else if (server.status === "busy") {
+      bar.className = "";
+      bar.innerHTML = '🔄 同步中…';
+    } else if (server.status === "err") {
+      bar.className = "err";
+      bar.innerHTML = '⚠️ 雲端連不上，現在顯示的是上次的資料 ' +
+        '<button id="syncNowBtn">重試</button>';
+    } else {
+      bar.className = "";
+      bar.innerHTML = '☁️ 已連線，資料 10 秒自動同步' + (t ? '｜最後同步 ' + t : '') +
+        ' <button id="syncNowBtn">立即同步</button>';
+    }
+    var btn2 = $("syncNowBtn");
+    if (btn2) btn2.addEventListener("click", refresh);
+  }
+
+  /* ---------- 核心計算（金額單位：分） ---------- */
   function calc(courtCents, ballCents, attCount, newCount) {
     var regularCount = attCount - newCount;
     var r = {
       ok: attCount > 0 && newCount <= attCount && (courtCents > 0 || ballCents > 0),
       allNew: regularCount <= 0 && attCount > 0,
-      regularEachCents: 0,   // 老社員每人（含找齊尾數前的基準）
-      newEachCents: 0,       // 新人每人
-      regularExtraCents: 0,  // 要加給前幾位老社員的尾數
-      newExtraCents: 0,      // 全新人時加給前幾位新人的尾數
-      courtEachCents: 0,
-      ballEachCents: 0
+      regularEachCents: 0, newEachCents: 0,
+      regularExtraCents: 0, newExtraCents: 0,
+      courtEachCents: 0, ballEachCents: 0
     };
     if (!r.ok) return r;
 
-    r.ballEachCents = ballCents / attCount;       // 每人球費（分，可有小數）
+    r.ballEachCents = ballCents / attCount;
     r.courtEachCents = regularCount > 0 ? courtCents / regularCount : 0;
 
     if (r.allNew) {
-      // 沒有老社員：全部費用由新人平均分（無條件捨去到元，尾數找齊）
       var totalCents = courtCents + ballCents;
       var base = Math.floor(totalCents / attCount / 100) * 100;
       r.newEachCents = base;
-      r.newExtraCents = Math.round((totalCents - base * attCount) / 100); // 剩多少元（0 ≤ extra < 人數）
+      r.newExtraCents = Math.round((totalCents - base * attCount) / 100);
       return r;
     }
 
-    // 新人：只付球費，四捨五入到元
     r.newEachCents = Math.round(r.ballEachCents / 100) * 100;
     var newSum = r.newEachCents * newCount;
-
-    // 老社員：付掉剩下的（場地費全部 + 球費扣除新人那部分）
-    // 無條件捨去到元，剩下的尾數（元）分給前幾位老社員，保證加總剛好
     var regularPool = (courtCents + ballCents) - newSum;
     var regBase = Math.floor(regularPool / regularCount / 100) * 100;
     r.regularEachCents = regBase;
@@ -295,11 +676,25 @@
     return r;
   }
 
+  function recordCalc(rec) {
+    return calc(Math.round(num(rec.courtFee) * 100),
+                Math.round(num(rec.ballPrice) * num(rec.ballCount) * 100),
+                Math.round(num(rec.attCount)), Math.round(num(rec.newCount)));
+  }
+
   /* ---------- 渲染 ---------- */
   function render() {
     renderResult();
     renderHistory();
-    save();
+    renderFoot();
+    if (!CLOUD && !API_URL) saveLocal();
+  }
+
+  function renderFoot() {
+    $("footNote").innerHTML = CLOUD
+      ? "☁️ 紀錄存在 Supabase 共用資料庫，所有社員看到的是同一份資料。"
+      : API_URL ? "☁️ 紀錄存在雲端，所有社員看到的是同一份資料。"
+      : "📴 資料只存在你自己的瀏覽器裡，換電腦或清除瀏覽器資料會不見喔。";
   }
 
   function renderResult() {
@@ -349,6 +744,10 @@
         '</div>';
     }
 
+    var paidSum = c.allNew
+      ? c.newEachCents * attCount + c.newExtraCents * 100
+      : c.regularEachCents * regularCount + c.newEachCents * newCount + c.regularExtraCents * 100;
+
     var breakdown =
       '<div class="breakdown">' +
       '<div><span>場地費</span><span>' + money(courtCents) + '</span></div>' +
@@ -362,12 +761,8 @@
           '<div class="strong"><span>新人每人</span><span>' + money(c.newEachCents) + '</span></div>') +
       '</div>';
 
-    var paidSum = c.allNew
-      ? c.newEachCents * attCount + c.newExtraCents * 100
-      : c.regularEachCents * regularCount + c.newEachCents * newCount + c.regularExtraCents * 100;
-
     var totalBox =
-      '<div class="total" style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;' +
+      '<div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;' +
       'border-bottom:1.5px solid var(--border);padding-bottom:12px;margin-bottom:14px;">' +
       '<div><div style="font-size:.85rem;color:var(--muted)">本週總費用</div>' +
       '<div style="font-size:1.6rem;font-weight:800">' + money(totalCents) + '</div></div>' +
@@ -376,70 +771,76 @@
       '</div>';
 
     var saveBtn =
-      '<div class="save-row"><button id="saveWeekBtn">💾 儲存這週紀錄</button></div>';
+      '<div class="save-row"><button id="saveWeekBtn"' + (CLOUD && !canEdit() ? ' title="登入後才能儲存"' : '') + '>💾 儲存這週紀錄</button></div>';
 
     box.innerHTML = totalBox + warn + amountsHtml + breakdown +
       '<div class="note">💡 新人只分球錢；場地費全部由老社員分擔。除不盡時四捨五入，' +
       '差幾塊錢由前幾位老社員找齊，加總剛好等於總費用。</div>' + saveBtn;
 
-    $("saveWeekBtn").addEventListener("click", function () {
-      saveWeek(courtCents, ballCents, ballPrice, ballCount, attCount, newCount, c, totalCents, paidSum);
-    });
+    $("saveWeekBtn").addEventListener("click", saveWeek);
   }
 
-  function saveWeek(courtCents, ballCents, ballPrice, ballCount, attCount, newCount, c, totalCents, paidSum) {
+  function saveWeek() {
+    var btn = $("saveWeekBtn");
     var label = $("weekLabel").value.trim() || todayLabel() + "（未命名）";
-    state.history.unshift({
+    var rec = {
       id: uid(),
       label: label,
       savedAt: Date.now(),
-      courtCents: courtCents,
-      ballCents: ballCents,
-      ballPrice: ballPrice,
-      ballCount: ballCount,
-      attCount: attCount,
-      newCount: newCount,
-      regularCount: attCount - newCount,
-      regularEachCents: c.regularEachCents,
-      newEachCents: c.newEachCents,
-      allNew: c.allNew,
-      totalCents: totalCents,
-      paidSumCents: paidSum
-    });
-    save();
-    renderHistory();
-    alert("已儲存「" + label + "」✅");
-  }
-
-  function uid() {
-    return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+      courtFee: fieldNum("courtFee"),
+      ballCount: Math.round(fieldNum("ballCount")),
+      ballPrice: fieldNum("ballPrice"),
+      attCount: Math.round(fieldNum("attCount")),
+      newCount: Math.round(fieldNum("newCount"))
+    };
+    if (rec.attCount <= 0 || (rec.courtFee <= 0 && rec.ballCount <= 0)) {
+      alert("先填好費用和人數再儲存喔"); return;
+    }
+    if (CLOUD) {
+      mutate({ action: "add", record: rec }, btn).then(function (d) {
+        if (d !== null) alert('已儲存並同步到雲端「' + label + '」✅');
+      });
+    } else {
+      local.history.unshift(rec);
+      saveLocal();
+      renderHistory();
+      alert('已儲存「' + label + '」✅');
+    }
   }
 
   function renderHistory() {
     var box = $("histBody");
     var clearWrap = $("histClearWrap");
-    if (state.history.length === 0) {
-      box.innerHTML = '<div class="empty">還沒有紀錄。算好之後按「儲存這週紀錄」，之後就能回頭查每個人當時付了多少。</div>';
+    var records = currentRecords();
+    if (records.length === 0) {
+      box.innerHTML = '<div class="empty">還沒有紀錄。算好之後按「儲存這週紀錄」，所有人都能在這裡查到。</div>';
       clearWrap.innerHTML = "";
       return;
     }
-    box.innerHTML = state.history.map(function (h) {
-      var lines = h.allNew
-        ? '<div class="line"><span>出席的每個人（全員）</span><span>' + money(h.newEachCents) + '</span></div>'
-        : '<div class="line"><span>老社員每人（' + h.regularCount + ' 位）</span><span>' + money(h.regularEachCents) + '</span></div>' +
-          '<div class="line"><span>新人每人（' + h.newCount + ' 位）</span><span>' + money(h.newEachCents) + '</span></div>';
-      return '<div class="hist-item" data-hist="' + h.id + '">' +
-        '<div class="hist-head" data-open="' + h.id + '">' +
-        '<span class="wk">📅 ' + esc(h.label) + '</span>' +
-        '<span class="sum">' + (h.allNew
-          ? '全 ' + money(h.newEachCents)
-          : '老 ' + money(h.regularEachCents) + '／新 ' + money(h.newEachCents)) + '</span>' +
-        '<button class="x" data-delhist="' + h.id + '" title="刪除這筆">✕</button>' +
+    box.innerHTML = records.map(function (h) {
+      var c = recordCalc(h);
+      var regCount = Math.round(num(h.attCount)) - Math.round(num(h.newCount));
+      var lines;
+      if (c.allNew) {
+        lines = '<div class="line"><span>出席的每個人（全員）</span><span>' + money(c.newEachCents) + '</span></div>';
+      } else {
+        lines =
+          '<div class="line"><span>老社員每人（' + regCount + ' 位）</span><span>' + money(c.regularEachCents) + '</span></div>' +
+          '<div class="line"><span>新人每人（' + Math.round(num(h.newCount)) + ' 位）</span><span>' + money(c.newEachCents) + '</span></div>';
+      }
+      var sum = c.allNew
+        ? '全 ' + money(c.newEachCents)
+        : '老 ' + money(c.regularEachCents) + '／新 ' + money(c.newEachCents);
+      return '<div class="hist-item" data-hist="' + esc(h.id) + '">' +
+        '<div class="hist-head" data-open="' + esc(h.id) + '">' +
+        '<span class="wk">📅 ' + esc(h.label || todayLabel() + "（未命名）") + '</span>' +
+        '<span class="sum">' + sum + '</span>' +
+        '<button class="x" data-delhist="' + esc(h.id) + '" title="刪除這筆">✕</button>' +
         '</div>' +
         '<div class="hist-body">' +
-        '<div class="hist-meta">出席 ' + h.attCount + ' 人（新人 ' + h.newCount + '）｜場地 ' + money(h.courtCents) +
-        '｜球 ' + h.ballCount + ' 顆 × ' + money(h.ballPrice) + '（' + money(h.ballCents) + '）｜儲存於 ' +
-        new Date(h.savedAt).toLocaleString("zh-TW") + '</div>' +
+        '<div class="hist-meta">出席 ' + Math.round(num(h.attCount)) + ' 人（新人 ' + Math.round(num(h.newCount)) + '）｜場地 ' + money(Math.round(num(h.courtFee) * 100)) +
+        '｜球 ' + Math.round(num(h.ballCount)) + ' 顆 × ' + money(Math.round(num(h.ballPrice) * 100)) +
+        '｜儲存於 ' + (h.savedAt ? new Date(Number(h.savedAt)).toLocaleString("zh-TW") : "—") + '</div>' +
         lines +
         '</div></div>';
     }).join("");
@@ -455,10 +856,12 @@
     box.querySelectorAll("[data-delhist]").forEach(function (el) {
       el.addEventListener("click", function () {
         var id = el.getAttribute("data-delhist");
-        var h = state.history.find(function (x) { return x.id === id; });
-        if (h && confirm("刪除紀錄「" + h.label + "」？")) {
-          state.history = state.history.filter(function (x) { return x.id !== id; });
-          save();
+        if (!confirm("刪除這筆紀錄？（雲端模式會同步刪掉所有人的這筆）")) return;
+        if (CLOUD || API_URL) {
+          mutate({ action: "delete", id: id });
+        } else {
+          local.history = local.history.filter(function (x) { return x.id !== id; });
+          saveLocal();
           renderHistory();
         }
       });
@@ -466,40 +869,58 @@
     var clearBtn = $("clearHistBtn");
     if (clearBtn) {
       clearBtn.addEventListener("click", function () {
-        if (confirm("確定要清除全部 " + state.history.length + " 筆歷史紀錄嗎？")) {
-          state.history = [];
-          save();
+        if (!confirm("確定要清除全部 " + records.length + " 筆歷史紀錄嗎？")) return;
+        if (CLOUD || API_URL) {
+          mutate({ action: "clearAll" });
+        } else {
+          local.history = [];
+          saveLocal();
           renderHistory();
         }
       });
     }
   }
 
-  function esc(s) {
-    return String(s).replace(/[&<>"']/g, function (c) {
-      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
-    });
-  }
-
   /* ---------- 事件 ---------- */
-  // 球價要記住
   var ballPriceInput = $("ballPrice");
-  ballPriceInput.value = state.ballPrice > 0 ? state.ballPrice : 50;
+  var ballPriceTimer = null;
   ballPriceInput.addEventListener("input", function () {
-    var v = parseFloat(ballPriceInput.value);
-    state.ballPrice = isFinite(v) && v > 0 ? v : 0;
-    save();
+    var v = fieldNum("ballPrice");
+    if (CLOUD) {
+      if (!canEdit()) { renderSyncBar(); return; }
+      clearTimeout(ballPriceTimer);
+      ballPriceTimer = setTimeout(function () {
+        mutate({ action: "setBallPrice", ballPrice: v });
+      }, 800);
+    } else if (API_URL) {
+      clearTimeout(ballPriceTimer);
+      ballPriceTimer = setTimeout(function () {
+        mutate({ action: "setBallPrice", ballPrice: v });
+      }, 800);
+    } else {
+      local.ballPrice = v;
+      saveLocal();
+    }
   });
 
-  // 任一欄改變就重算
   ["courtFee", "ballCount", "attCount", "newCount"].forEach(function (id) {
     $(id).addEventListener("input", renderResult);
   });
 
-  // 預設週次名稱
+  /* ---------- 初始化 ---------- */
   $("weekLabel").value = todayLabel();
-
+  ballPriceInput.value = currentBallPrice() > 0 ? currentBallPrice() : 50;
+  loadSession();
+  renderAuth();
+  renderSyncBar();
   render();
+
+  if (CLOUD || API_URL) {
+    refresh();
+    setInterval(function () {
+      if (!document.hidden) refresh();
+    }, POLL_MS);
+  }
 })();
 </script>
 </body>
