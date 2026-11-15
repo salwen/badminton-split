@@ -429,7 +429,7 @@
       btn.onclick = function () { signOut(); };
       var signup2 = $("signupBtn");
       if (signup2) signup2.style.display = "none";
-      $("loginMsg").textContent = "可以儲存、修改、刪除紀錄了";
+      $("loginMsg").textContent = "可以查看、儲存、修改、刪除紀錄了";
     } else {
       card.querySelector("h2").innerHTML = '<span class="num">🔑</span>社員登入';
       card.querySelector(".row").style.display = "";
@@ -444,7 +444,7 @@
           btn.disabled = false;
           $("loginPassword").value = "";
           $("loginMsg").textContent = res.ok ? "" : res.error;
-          if (res.ok) { renderAuth(); renderSyncBar(); render(); }
+          if (res.ok) { renderAuth(); refresh(); }
         });
       };
       var signup = $("signupBtn");
@@ -460,7 +460,7 @@
           signUp(email, pw).then(function (res) {
             signup.disabled = false;
             $("loginPassword").value = "";
-            if (res.ok) { $("loginMsg").textContent = "註冊成功，已自動登入"; renderAuth(); renderSyncBar(); render(); }
+            if (res.ok) { $("loginMsg").textContent = "註冊成功，已自動登入"; renderAuth(); refresh(); }
             else if (res.ok === "confirm") { $("loginMsg").textContent = res.msg; }
             else { $("loginMsg").textContent = res.error; }
           });
@@ -513,6 +513,14 @@
 
   function refresh() {
     if (CLOUD) {
+      if (!canEdit()) {
+        // 未登入：看不到任何雲端資料
+        server.records = [];
+        server.status = "ok";
+        renderSyncBar();
+        render();
+        return;
+      }
       server.status = "busy";
       renderSyncBar();
       return sbFetch("/rest/v1/club_ledger_state?select=*")
@@ -617,9 +625,9 @@
           '<button id="syncNowBtn">重試</button>';
       } else {
         bar.className = "";
-        bar.innerHTML = (canEdit() ? '☁️ 已連線，資料 10 秒自動同步' : '👁️ 訪客模式：只能查看；登入後才能修改') +
-          (t ? '｜最後同步 ' + t : '') +
-          ' <button id="syncNowBtn">立即同步</button>';
+        bar.innerHTML = (canEdit() ? '☁️ 已登入，資料 10 秒自動同步' : '🔒 未登入：登入後才能查看與修改資料') +
+          (t && canEdit() ? '｜最後同步 ' + t : '') +
+          (canEdit() ? ' <button id="syncNowBtn">立即同步</button>' : '');
       }
       var btn = $("syncNowBtn");
       if (btn) btn.addEventListener("click", refresh);
@@ -692,7 +700,9 @@
 
   function renderFoot() {
     $("footNote").innerHTML = CLOUD
-      ? "☁️ 紀錄存在 Supabase 共用資料庫，所有社員看到的是同一份資料。"
+      ? (canEdit()
+        ? "☁️ 紀錄存在 Supabase 共用資料庫，所有登入的社員看到的是同一份資料。"
+        : "🔒 未登入：歷史紀錄需要社員帳號登入後才能查看。")
       : API_URL ? "☁️ 紀錄存在雲端，所有社員看到的是同一份資料。"
       : "📴 資料只存在你自己的瀏覽器裡，換電腦或清除瀏覽器資料會不見喔。";
   }
@@ -812,6 +822,11 @@
     var box = $("histBody");
     var clearWrap = $("histClearWrap");
     var records = currentRecords();
+    if (CLOUD && !canEdit()) {
+      box.innerHTML = '<div class="empty">🔒 歷史紀錄已上鎖，登入社員帳號後才能查看</div>';
+      clearWrap.innerHTML = "";
+      return;
+    }
     if (records.length === 0) {
       box.innerHTML = '<div class="empty">還沒有紀錄。算好之後按「儲存這週紀錄」，所有人都能在這裡查到。</div>';
       clearWrap.innerHTML = "";
